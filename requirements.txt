@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+celery[redis]
+redis
+langchain
+langchain-community
+python-multipart
+python-magic
+pgvector
+psycopg2-binary
+sqlalchemy
+langchain-postgres
+pypdf
+unstructured
+Markdown
+libmagic

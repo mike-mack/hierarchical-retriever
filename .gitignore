@@ -13,3 +13,12 @@ __pycache__/
 
 # Uploads directory
 uploads/
+
+# Test coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.pytest_cache/
+.tox/

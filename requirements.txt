@@ -15,3 +15,10 @@ pypdf
 unstructured
 Markdown
 libmagic
+
+# Testing dependencies
+pytest>=7.0.0
+pytest-asyncio
+pytest-cov
+pytest-mock
+httpx

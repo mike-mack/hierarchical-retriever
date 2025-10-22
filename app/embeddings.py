@@ -1,5 +1,9 @@
 import os
-import magic
+try:
+    import magic
+    MAGIC_AVAILABLE = True
+except ImportError:
+    MAGIC_AVAILABLE = False
 from pathlib import Path
 from langchain_ollama import OllamaEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -65,25 +69,28 @@ def validate_file(file_path: str, max_size_mb: int = 50) -> dict:
     
     # Verify MIME type matches extension (security check)
     mime_type = "unknown"
-    try:
-        mime = magic.Magic(mime=True)
-        mime_type = mime.from_file(file_path)
-        
-        # Expected MIME types for each extension
-        expected_mimes = {
-            '.txt': ['text/plain', 'text/x-plain'],
-            '.md': ['text/plain', 'text/markdown', 'text/x-markdown'],
-            '.pdf': ['application/pdf']
-        }
-        
-        if file_extension in expected_mimes:
-            if mime_type not in expected_mimes[file_extension]:
-                raise FileValidationError(
-                    f"MIME type mismatch: file has extension {file_extension} but MIME type is {mime_type}"
-                )
-    except Exception as e:
-        # If python-magic is not available, log warning but continue
-        print(f"Warning: Could not verify MIME type: {e}")
+    if MAGIC_AVAILABLE:
+        try:
+            mime = magic.Magic(mime=True)
+            mime_type = mime.from_file(file_path)
+            
+            # Expected MIME types for each extension
+            expected_mimes = {
+                '.txt': ['text/plain', 'text/x-plain'],
+                '.md': ['text/plain', 'text/markdown', 'text/x-markdown'],
+                '.pdf': ['application/pdf']
+            }
+            
+            if file_extension in expected_mimes:
+                if mime_type not in expected_mimes[file_extension]:
+                    raise FileValidationError(
+                        f"MIME type mismatch: file has extension {file_extension} but MIME type is {mime_type}"
+                    )
+        except Exception as e:
+            # If python-magic fails, log warning but continue
+            print(f"Warning: Could not verify MIME type: {e}")
+    else:
+        print("Warning: python-magic not available, skipping MIME type verification")
     
     # Check for suspicious file names (basic security check)
     suspicious_patterns = ['..', '~', '$', '`', '|', ';', '&', '\x00']

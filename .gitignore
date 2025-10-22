@@ -1,1 +1,15 @@
+# Test files
+test-upload.txt
+
+# Python virtual environment
+venv/
+venv
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Uploads directory
 uploads/

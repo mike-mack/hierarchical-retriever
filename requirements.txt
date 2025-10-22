@@ -4,6 +4,7 @@ celery[redis]
 redis
 langchain
 langchain-community
+langchain-ollama
 python-multipart
 python-magic
 pgvector

@@ -1,7 +1,7 @@
 import os
 import magic
 from pathlib import Path
-from langchain_community.embeddings import OllamaEmbeddings
+from langchain_ollama import OllamaEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_postgres import PGVector
 from langchain_core.documents import Document
@@ -10,6 +10,7 @@ from langchain_community.document_loaders import (
     UnstructuredMarkdownLoader,
     PyPDFLoader
 )
+from .vectorstore import get_vector_store
 
 
 class FileValidationError(Exception):
@@ -111,17 +112,8 @@ def process_document(file_path: str):
     if not validation_result["valid"]:
         return {"error": validation_result["error"]}
 
-    # Connect to vector store
-    connection = os.getenv("DATABASE_URL") 
-    collection_name = "documents"
-    ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
-
-    vector_store = PGVector(  
-        embeddings=OllamaEmbeddings(model="nomic-embed-text", base_url=ollama_base_url),
-        collection_name=collection_name,  
-        connection=connection,  
-        use_jsonb=True,
-    )
+    doc_store = get_vector_store("doc_level_embeddings")
+    chunk_store = get_vector_store("chunk_level_embeddings")
 
     # Detect file type and load document
     file_extension = Path(file_path).suffix.lower()
@@ -137,6 +129,7 @@ def process_document(file_path: str):
     
     # Load documents
     documents = loader.load()
+    doc_store.add_documents(documents)
 
     # Split documents into chunks
     splitter = RecursiveCharacterTextSplitter(
@@ -145,7 +138,7 @@ def process_document(file_path: str):
     split_documents = splitter.split_documents(documents)
     
     # Add documents to vector store
-    vector_store.add_documents(split_documents)
+    chunk_store.add_documents(split_documents)
     
     return {
         "num_chunks": len(split_documents),

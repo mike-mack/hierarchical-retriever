@@ -1,5 +1,7 @@
+import traceback
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import HTMLResponse
+from app.retrievers import HierarchicalRetriever
 from app.tasks import process_file_task
 import os, shutil
 from pathlib import Path
@@ -74,7 +76,7 @@ def list_documents():
     Each document includes its source path and filename.
     """
     try:
-        vector_store = get_vector_store()
+        # vector_store = get_vector_store("doc_level_embeddings")
         
         # Get the database connection to query metadata directly
         connection_string = os.getenv("DATABASE_URL")
@@ -95,7 +97,7 @@ def list_documents():
                 SELECT DISTINCT cmetadata->>'source' as source
                 FROM langchain_pg_embedding
                 WHERE collection_id = (
-                    SELECT uuid FROM langchain_pg_collection WHERE name = 'documents'
+                    SELECT uuid FROM langchain_pg_collection WHERE name = 'doc_level_embeddings'
                 )
                 AND cmetadata->>'source' IS NOT NULL
                 ORDER BY source
@@ -229,10 +231,13 @@ def query_documents(query: str = Form(...), k: int = Form(5)):
         # Limit k to reasonable bounds
         k = max(1, min(k, 20))
         
-        vector_store = get_vector_store()
-        
-        # Perform similarity search
-        results = vector_store.similarity_search_with_score(query, k=k)
+
+
+        doc_store = get_vector_store("doc_level_embeddings")
+        chunk_store = get_vector_store("chunk_level_embeddings")
+
+        retriever = HierarchicalRetriever(doc_store, chunk_store)
+        results = retriever.get_relevant_documents(query)
         
         if not results:
             return f"""
@@ -277,6 +282,9 @@ def query_documents(query: str = Form(...), k: int = Form(5)):
         return html
     
     except Exception as e:
+
+        traceback.print_exc()
+        print(e)
         return f"""
         <div style="color: red;">
             <p>❌ Error: {str(e)}</p>

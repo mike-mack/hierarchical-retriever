@@ -96,3 +96,74 @@ class MetadataHierarchicalRetriever:
         """
         chunks_with_scores = self.get_relevant_documents(query)
         return [doc for doc, score in chunks_with_scores]
+
+
+
+class WeightedMetadataHierarchicalRetriever:
+    def __init__(self, vector_store, retriever_weights:dict, n_docs=3, n_chunks_per_doc=5):
+        """
+        Args:
+            vector_store: A PGVector store containing both summaries and chunks
+            retriever_weights: dict of {chunk type: weight}
+            n_docs: Number of documents to retrieve in coarse retrieval
+            n_chunks_per_doc: Number of chunks to retrieve per document in fine retrieval
+        """
+        self.vector_store = vector_store
+        self.n_docs = n_docs
+        self.n_chunks_per_doc = n_chunks_per_doc
+        self.retriever_weights = retriever_weights
+
+    def get_relevant_documents(self, query: str):
+        """
+        Perform hierarchical retrieval with weighted scoring based on chunk types.
+        
+        Args:
+            query: The search query
+            
+        Returns:
+            list: List of (Document, weighted_score) tuples for relevant chunks, sorted by weighted score
+        """
+        # Step 1: Coarse retrieval - search only summaries
+        summaries = self.vector_store.similarity_search_with_score(
+            query,
+            k=self.n_docs,
+            filter={"type": "summary"}
+        )
+        
+        relevant_chunks = []
+        
+        # Step 2: Fine retrieval - for each relevant document, get its chunks
+        for summary_doc, summary_score in summaries:
+            doc_id = summary_doc.metadata.get("source")
+            
+            if doc_id:
+                # Search for chunks from this specific document
+                chunks = self.vector_store.similarity_search_with_score(
+                    query,
+                    k=self.n_chunks_per_doc,
+                    filter={"source": doc_id, "type": "chunk"}
+                )
+                
+                # Apply weights and add to results
+                for chunk_doc, chunk_score in chunks:
+                    # Get the chunk type from metadata (default to "chunk" if not specified)
+                    chunk_type = chunk_doc.metadata.get("chunk_type", "chunk")
+                    
+                    # Get the weight for this chunk type (default to 1.0 if not in weights dict)
+                    weight = self.retriever_weights.get(chunk_type, 1.0)
+                    
+                    # Calculate weighted score - divide by weight so higher weights = lower scores = better ranking
+                    weighted_score = chunk_score / weight
+                    
+                    # Add metadata about scoring
+                    chunk_doc.metadata["parent_summary_score"] = summary_score
+                    chunk_doc.metadata["original_score"] = chunk_score
+                    chunk_doc.metadata["weight"] = weight
+                    chunk_doc.metadata["weighted_score"] = weighted_score
+                    
+                    relevant_chunks.append((chunk_doc, weighted_score))
+        
+        # Sort by weighted score (lower is better for distance-based scores)
+        relevant_chunks.sort(key=lambda x: x[1])
+        
+        return relevant_chunks

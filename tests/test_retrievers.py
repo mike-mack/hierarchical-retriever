@@ -4,7 +4,11 @@ Tests for the retrievers module.
 import pytest
 from unittest.mock import MagicMock
 from langchain_core.documents import Document
-from app.retrievers import HierarchicalRetriever, MetadataHierarchicalRetriever
+from app.retrievers import (
+    HierarchicalRetriever,
+    MetadataHierarchicalRetriever,
+    WeightedMetadataHierarchicalRetriever
+)
 
 
 class TestHierarchicalRetriever:
@@ -379,3 +383,352 @@ class TestMetadataHierarchicalRetriever:
         
         # Should only call once for summaries, not for chunks
         assert mock_vector_store.similarity_search_with_score.call_count == 1
+
+
+class TestWeightedMetadataHierarchicalRetriever:
+    """Test the WeightedMetadataHierarchicalRetriever class."""
+    
+    def test_initialization(self, mock_vector_store):
+        """Test retriever initialization with default parameters."""
+        weights = {"header": 0.8, "text": 1.0}
+        retriever = WeightedMetadataHierarchicalRetriever(
+            vector_store=mock_vector_store,
+            retriever_weights=weights
+        )
+        
+        assert retriever.vector_store == mock_vector_store
+        assert retriever.retriever_weights == weights
+        assert retriever.n_docs == 3
+        assert retriever.n_chunks_per_doc == 5
+    
+    def test_initialization_custom_params(self, mock_vector_store):
+        """Test retriever initialization with custom parameters."""
+        weights = {"header": 0.5}
+        retriever = WeightedMetadataHierarchicalRetriever(
+            vector_store=mock_vector_store,
+            retriever_weights=weights,
+            n_docs=7,
+            n_chunks_per_doc=10
+        )
+        
+        assert retriever.n_docs == 7
+        assert retriever.n_chunks_per_doc == 10
+        assert retriever.retriever_weights == weights
+    
+    def test_get_relevant_documents_empty_results(self, mock_vector_store):
+        """Test retrieval with no matching summaries."""
+        mock_vector_store.similarity_search_with_score.return_value = []
+        
+        weights = {"header": 0.8, "text": 1.0}
+        retriever = WeightedMetadataHierarchicalRetriever(
+            vector_store=mock_vector_store,
+            retriever_weights=weights
+        )
+        results = retriever.get_relevant_documents("test query")
+        
+        assert results == []
+        mock_vector_store.similarity_search_with_score.assert_called_once_with(
+            "test query",
+            k=3,
+            filter={"type": "summary"}
+        )
+    
+    def test_get_relevant_documents_applies_weights(self, mock_vector_store):
+        """Test that weights are correctly applied to chunk scores."""
+        weights = {"header": 2.0, "text": 1.0, "code": 0.5}
+        
+        # Mock summaries
+        summaries = [
+            (Document(
+                page_content="Summary 1",
+                metadata={"source": "doc1.txt", "type": "summary"}
+            ), 0.1)
+        ]
+        
+        # Mock chunks with different chunk_types
+        chunks = [
+            (Document(
+                page_content="Header chunk",
+                metadata={"source": "doc1.txt", "type": "chunk", "chunk_type": "header"}
+            ), 0.2),  # Should be weighted to 0.2 / 2.0 = 0.1
+            (Document(
+                page_content="Text chunk",
+                metadata={"source": "doc1.txt", "type": "chunk", "chunk_type": "text"}
+            ), 0.2),  # Should be weighted to 0.2 / 1.0 = 0.2
+            (Document(
+                page_content="Code chunk",
+                metadata={"source": "doc1.txt", "type": "chunk", "chunk_type": "code"}
+            ), 0.2),  # Should be weighted to 0.2 / 0.5 = 0.4
+        ]
+        
+        def side_effect(query, k, filter):
+            if filter.get("type") == "summary":
+                return summaries[:k]
+            elif filter.get("type") == "chunk":
+                return chunks[:k]
+            return []
+        
+        mock_vector_store.similarity_search_with_score.side_effect = side_effect
+        
+        retriever = WeightedMetadataHierarchicalRetriever(
+            vector_store=mock_vector_store,
+            retriever_weights=weights,
+            n_docs=1,
+            n_chunks_per_doc=3
+        )
+        results = retriever.get_relevant_documents("test query")
+        
+        # Should return 3 chunks
+        assert len(results) == 3
+        
+        # Verify chunks are sorted by weighted score (lower is better)
+        # Header (0.1) should be first, text (0.2) second, code (0.4) third
+        assert results[0][0].metadata["chunk_type"] == "header"
+        assert abs(results[0][1] - 0.1) < 0.001  # weighted_score
+        assert results[1][0].metadata["chunk_type"] == "text"
+        assert abs(results[1][1] - 0.2) < 0.001
+        assert results[2][0].metadata["chunk_type"] == "code"
+        assert abs(results[2][1] - 0.4) < 0.001
+        
+        # Verify metadata was added
+        for chunk_doc, weighted_score in results:
+            assert "parent_summary_score" in chunk_doc.metadata
+            assert "original_score" in chunk_doc.metadata
+            assert "weight" in chunk_doc.metadata
+            assert "weighted_score" in chunk_doc.metadata
+            assert chunk_doc.metadata["parent_summary_score"] == 0.1
+            assert chunk_doc.metadata["original_score"] == 0.2
+    
+    def test_get_relevant_documents_default_weight(self, mock_vector_store):
+        """Test that chunks without matching weight get default weight of 1.0."""
+        weights = {"header": 0.5}  # Only header has a weight
+        
+        summaries = [
+            (Document(
+                page_content="Summary",
+                metadata={"source": "doc1.txt", "type": "summary"}
+            ), 0.1)
+        ]
+        
+        chunks = [
+            (Document(
+                page_content="Unknown type chunk",
+                metadata={"source": "doc1.txt", "type": "chunk", "chunk_type": "unknown"}
+            ), 0.3)
+        ]
+        
+        def side_effect(query, k, filter):
+            if filter.get("type") == "summary":
+                return summaries
+            return chunks
+        
+        mock_vector_store.similarity_search_with_score.side_effect = side_effect
+        
+        retriever = WeightedMetadataHierarchicalRetriever(
+            vector_store=mock_vector_store,
+            retriever_weights=weights
+        )
+        results = retriever.get_relevant_documents("test query")
+        
+        assert len(results) == 1
+        # Should use default weight of 1.0
+        assert results[0][0].metadata["weight"] == 1.0
+        assert results[0][1] == 0.3  # 0.3 * 1.0
+    
+    def test_get_relevant_documents_missing_chunk_type(self, mock_vector_store):
+        """Test handling of chunks without chunk_type metadata."""
+        weights = {"header": 0.5}
+        
+        summaries = [
+            (Document(
+                page_content="Summary",
+                metadata={"source": "doc1.txt", "type": "summary"}
+            ), 0.1)
+        ]
+        
+        # Chunk without chunk_type
+        chunks = [
+            (Document(
+                page_content="Chunk without type",
+                metadata={"source": "doc1.txt", "type": "chunk"}  # No chunk_type
+            ), 0.4)
+        ]
+        
+        def side_effect(query, k, filter):
+            if filter.get("type") == "summary":
+                return summaries
+            return chunks
+        
+        mock_vector_store.similarity_search_with_score.side_effect = side_effect
+        
+        retriever = WeightedMetadataHierarchicalRetriever(
+            vector_store=mock_vector_store,
+            retriever_weights=weights
+        )
+        results = retriever.get_relevant_documents("test query")
+        
+        assert len(results) == 1
+        # Should default to "chunk" type and use default weight of 1.0
+        assert results[0][0].metadata["weight"] == 1.0
+        assert results[0][1] == 0.4
+    
+    def test_get_relevant_documents_multiple_docs(self, mock_vector_store):
+        """Test retrieval with multiple documents and weighted scoring."""
+        weights = {"header": 2.0, "text": 1.0}
+        
+        summaries = [
+            (Document(
+                page_content="Summary 1",
+                metadata={"source": "doc1.txt", "type": "summary"}
+            ), 0.1),
+            (Document(
+                page_content="Summary 2",
+                metadata={"source": "doc2.txt", "type": "summary"}
+            ), 0.15)
+        ]
+        
+        chunks_doc1 = [
+            (Document(
+                page_content="Header from doc1",
+                metadata={"source": "doc1.txt", "type": "chunk", "chunk_type": "header"}
+            ), 0.2)  # weighted: 0.2 / 2.0 = 0.1
+        ]
+        
+        chunks_doc2 = [
+            (Document(
+                page_content="Text from doc2",
+                metadata={"source": "doc2.txt", "type": "chunk", "chunk_type": "text"}
+            ), 0.2)  # weighted: 0.2 / 1.0 = 0.2
+        ]
+        
+        def side_effect(query, k, filter):
+            if filter.get("type") == "summary":
+                return summaries[:k]
+            elif filter.get("source") == "doc1.txt":
+                return chunks_doc1[:k]
+            elif filter.get("source") == "doc2.txt":
+                return chunks_doc2[:k]
+            return []
+        
+        mock_vector_store.similarity_search_with_score.side_effect = side_effect
+        
+        retriever = WeightedMetadataHierarchicalRetriever(
+            vector_store=mock_vector_store,
+            retriever_weights=weights,
+            n_docs=2,
+            n_chunks_per_doc=1
+        )
+        results = retriever.get_relevant_documents("test query")
+        
+        assert len(results) == 2
+        
+        # Header should be first with score 0.1, text second with score 0.2
+        assert abs(results[0][1] - 0.1) < 0.001
+        assert results[0][0].metadata["chunk_type"] == "header"
+        assert abs(results[1][1] - 0.2) < 0.001
+        assert results[1][0].metadata["chunk_type"] == "text"
+    
+    def test_get_relevant_documents_respects_n_docs(self, mock_vector_store):
+        """Test that n_docs parameter limits document selection."""
+        weights = {"text": 1.0}
+        summaries = [
+            (Document(
+                page_content=f"Summary {i}",
+                metadata={"source": f"doc{i}.txt", "type": "summary"}
+            ), 0.1 * i)
+            for i in range(5)
+        ]
+        
+        mock_vector_store.similarity_search_with_score.return_value = summaries
+        
+        retriever = WeightedMetadataHierarchicalRetriever(
+            vector_store=mock_vector_store,
+            retriever_weights=weights,
+            n_docs=2
+        )
+        
+        retriever.get_relevant_documents("test query")
+        
+        first_call = mock_vector_store.similarity_search_with_score.call_args_list[0]
+        assert first_call[1]["k"] == 2
+        assert first_call[1]["filter"] == {"type": "summary"}
+    
+    def test_get_relevant_documents_respects_n_chunks_per_doc(self, mock_vector_store):
+        """Test that n_chunks_per_doc parameter limits chunk selection."""
+        weights = {"text": 1.0}
+        summaries = [
+            (Document(
+                page_content="Summary",
+                metadata={"source": "doc1.txt", "type": "summary"}
+            ), 0.1)
+        ]
+        
+        def side_effect(query, k, filter):
+            if filter.get("type") == "summary":
+                return summaries
+            return []
+        
+        mock_vector_store.similarity_search_with_score.side_effect = side_effect
+        
+        retriever = WeightedMetadataHierarchicalRetriever(
+            vector_store=mock_vector_store,
+            retriever_weights=weights,
+            n_docs=1,
+            n_chunks_per_doc=8
+        )
+        
+        retriever.get_relevant_documents("test query")
+        
+        # Check that chunks were requested with correct k
+        chunk_calls = [
+            call for call in mock_vector_store.similarity_search_with_score.call_args_list
+            if call[1]["filter"].get("type") == "chunk"
+        ]
+        
+        assert len(chunk_calls) == 1
+        assert chunk_calls[0][1]["k"] == 8
+    
+    def test_get_relevant_documents_sorting(self, mock_vector_store):
+        """Test that results are sorted by weighted score."""
+        weights = {"high": 2.0, "medium": 1.0, "low": 0.5}
+        
+        summaries = [
+            (Document(
+                page_content="Summary",
+                metadata={"source": "doc1.txt", "type": "summary"}
+            ), 0.1)
+        ]
+        
+        # All chunks have same original score but different weights
+        chunks = [
+            (Document(
+                page_content="Low priority",
+                metadata={"source": "doc1.txt", "type": "chunk", "chunk_type": "low"}
+            ), 0.5),  # weighted: 0.5 / 0.5 = 1.0
+            (Document(
+                page_content="High priority",
+                metadata={"source": "doc1.txt", "type": "chunk", "chunk_type": "high"}
+            ), 0.5),  # weighted: 0.5 / 2.0 = 0.25
+            (Document(
+                page_content="Medium priority",
+                metadata={"source": "doc1.txt", "type": "chunk", "chunk_type": "medium"}
+            ), 0.5),  # weighted: 0.5 / 1.0 = 0.5
+        ]
+        
+        def side_effect(query, k, filter):
+            if filter.get("type") == "summary":
+                return summaries
+            return chunks
+        
+        mock_vector_store.similarity_search_with_score.side_effect = side_effect
+        
+        retriever = WeightedMetadataHierarchicalRetriever(
+            vector_store=mock_vector_store,
+            retriever_weights=weights
+        )
+        results = retriever.get_relevant_documents("test query")
+        
+        # Should be sorted by weighted score: high (0.25), medium (0.5), low (1.0)
+        assert results[0][0].page_content == "High priority"
+        assert results[1][0].page_content == "Medium priority"
+        assert results[2][0].page_content == "Low priority"

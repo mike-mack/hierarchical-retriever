@@ -112,15 +112,39 @@ def validate_file(file_path: str, max_size_mb: int = 50) -> dict:
     }
 
 
+def generate_summary(text: str, max_length: int = 200) -> str:
+    """
+    Generate a summary of the document text.
+    For now, this is a simple truncation. In production, you'd use an LLM.
+    
+    Args:
+        text: The full document text
+        max_length: Maximum length of summary in words
+    
+    Returns:
+        str: Summary text
+    """
+    # Simple extractive summary - first N words
+    # TODO: Replace with LLM-based summarization (e.g., using Ollama)
+    words = text.split()
+    if len(words) <= max_length:
+        return text
+    return ' '.join(words[:max_length]) + "..."
+
+
 def process_document(file_path: str):
+    """
+    Process a document by:
+    1. Loading the full document
+    2. Generating a summary and storing it with type="summary"
+    3. Chunking the document and storing chunks with type="chunk"
+    All stored in the same vector collection with metadata differentiation.
+    """
     # Validate file first
     validation_result = validate_file(file_path)
 
     if not validation_result["valid"]:
         return {"error": validation_result["error"]}
-
-    doc_store = get_vector_store("doc_level_embeddings")
-    chunk_store = get_vector_store("chunk_level_embeddings")
 
     # Detect file type and load document
     file_extension = Path(file_path).suffix.lower()
@@ -134,18 +158,60 @@ def process_document(file_path: str):
     else:
         raise ValueError(f"Unsupported file type: {file_extension}. Supported types: .txt, .md, .pdf")
     
-    # Load documents
+    # Get single vector store for both summaries and chunks
+    vector_store = get_vector_store("hierarchical_documents")
+    source_id = os.path.basename(file_path)
+    
+    # Load the full document(s)
     documents = loader.load()
-    doc_store.add_documents(documents)
-
+    
+    # Combine all pages/sections into one text for summarization
+    full_text = "\n\n".join([doc.page_content for doc in documents])
+    
+    # Generate summary
+    summary_text = generate_summary(full_text)
+    
+    # Create summary document with type="summary" metadata
+    summary_doc = Document(
+        page_content=summary_text,
+        metadata={
+            "source": source_id,
+            "type": "summary",
+            "file_path": file_path,
+            "file_extension": file_extension
+        }
+    )
+    
+    # Add summary to vector store
+    vector_store.add_documents([summary_doc])
+    
     # Split documents into chunks
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500, chunk_overlap=50
+        chunk_size=500, 
+        chunk_overlap=50
     )
     split_documents = splitter.split_documents(documents)
     
-    # Add documents to vector store
-    chunk_store.add_documents(split_documents)
+    # Add type="chunk" metadata to all chunks
+    for i, chunk in enumerate(split_documents):
+        chunk.metadata.update({
+            "source": source_id,
+            "type": "chunk",
+            "chunk_index": i,
+            "file_path": file_path,
+            "file_extension": file_extension
+        })
+    
+    # Add chunks to vector store
+    vector_store.add_documents(split_documents)
+    
+    return {
+        "success": True,
+        "source_id": source_id,
+        "summary_stored": True,
+        "chunks_stored": len(split_documents),
+        "collection": "hierarchical_documents"
+    }
     
     return {
         "num_chunks": len(split_documents),

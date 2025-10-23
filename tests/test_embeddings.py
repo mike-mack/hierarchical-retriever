@@ -86,10 +86,9 @@ class TestProcessDocument:
     @patch('app.embeddings.TextLoader')
     def test_process_text_document(self, mock_loader, mock_get_vector_store, sample_text_file, sample_documents):
         """Test processing a text document."""
-        # Setup mocks
-        mock_doc_store = MagicMock()
-        mock_chunk_store = MagicMock()
-        mock_get_vector_store.side_effect = [mock_doc_store, mock_chunk_store]
+        # Setup mocks - now only one vector store call
+        mock_vector_store = MagicMock()
+        mock_get_vector_store.return_value = mock_vector_store
         
         mock_loader_instance = MagicMock()
         mock_loader_instance.load.return_value = sample_documents
@@ -98,24 +97,23 @@ class TestProcessDocument:
         # Process document
         result = process_document(sample_text_file)
         
-        # Assertions
-        assert "num_chunks" in result
-        assert result["file_type"] == ".txt"
-        assert result["message"] == "Documents processed and stored successfully"
-        assert "file_info" in result
+        # Assertions - new return format
+        assert result["success"] is True
+        assert result["source_id"] == "test.txt"
+        assert result["summary_stored"] is True
+        assert result["chunks_stored"] > 0
+        assert result["collection"] == "hierarchical_documents"
         
-        # Verify vector stores were called
-        mock_doc_store.add_documents.assert_called_once()
-        mock_chunk_store.add_documents.assert_called_once()
+        # Verify vector store was called twice: once for summary, once for chunks
+        assert mock_vector_store.add_documents.call_count == 2
     
     @patch('app.embeddings.get_vector_store')
     @patch('app.embeddings.UnstructuredMarkdownLoader')
     def test_process_markdown_document(self, mock_loader, mock_get_vector_store, sample_markdown_file, sample_documents):
         """Test processing a markdown document."""
-        # Setup mocks
-        mock_doc_store = MagicMock()
-        mock_chunk_store = MagicMock()
-        mock_get_vector_store.side_effect = [mock_doc_store, mock_chunk_store]
+        # Setup mocks - now only one vector store call
+        mock_vector_store = MagicMock()
+        mock_get_vector_store.return_value = mock_vector_store
         
         mock_loader_instance = MagicMock()
         mock_loader_instance.load.return_value = sample_documents
@@ -124,11 +122,12 @@ class TestProcessDocument:
         # Process document
         result = process_document(sample_markdown_file)
         
-        # Assertions
-        assert result["file_type"] == ".md"
-        assert "num_chunks" in result
-        mock_doc_store.add_documents.assert_called_once()
-        mock_chunk_store.add_documents.assert_called_once()
+        # Assertions - new return format
+        assert result["success"] is True
+        assert result["source_id"] == "test.md"
+        assert result["summary_stored"] is True
+        assert result["chunks_stored"] > 0
+        assert mock_vector_store.add_documents.call_count == 2
     
     @patch('app.embeddings.get_vector_store')
     def test_process_invalid_document(self, mock_get_vector_store, empty_file):
@@ -149,10 +148,9 @@ class TestProcessDocument:
     @patch('app.embeddings.TextLoader')
     def test_document_chunking(self, mock_loader, mock_get_vector_store, sample_text_file, sample_documents):
         """Test that documents are properly chunked."""
-        # Setup mocks
-        mock_doc_store = MagicMock()
-        mock_chunk_store = MagicMock()
-        mock_get_vector_store.side_effect = [mock_doc_store, mock_chunk_store]
+        # Setup mocks - now only one vector store call
+        mock_vector_store = MagicMock()
+        mock_get_vector_store.return_value = mock_vector_store
         
         # Create a longer document for chunking
         long_doc = [Document(
@@ -166,10 +164,18 @@ class TestProcessDocument:
         # Process document
         result = process_document(sample_text_file)
         
-        # Verify chunks were created
-        assert result["num_chunks"] > 0
+        # Verify chunks were created in new format
+        assert result["chunks_stored"] > 0
         
-        # Verify chunk store received documents
-        mock_chunk_store.add_documents.assert_called_once()
-        chunks_added = mock_chunk_store.add_documents.call_args[0][0]
+        # Verify vector store received documents (summary + chunks)
+        assert mock_vector_store.add_documents.call_count == 2
+        
+        # Get the second call (chunks) and verify
+        chunks_call = mock_vector_store.add_documents.call_args_list[1]
+        chunks_added = chunks_call[0][0]
         assert len(chunks_added) > 0
+        
+        # Verify metadata includes type="chunk"
+        for chunk in chunks_added:
+            assert chunk.metadata.get("type") == "chunk"
+            assert "chunk_index" in chunk.metadata

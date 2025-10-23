@@ -1,7 +1,7 @@
 import traceback
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import HTMLResponse
-from app.retrievers import HierarchicalRetriever
+from app.retrievers import MetadataHierarchicalRetriever
 from app.tasks import process_file_task
 import os, shutil
 from pathlib import Path
@@ -97,7 +97,7 @@ def list_documents():
                 SELECT DISTINCT cmetadata->>'source' as source
                 FROM langchain_pg_embedding
                 WHERE collection_id = (
-                    SELECT uuid FROM langchain_pg_collection WHERE name = 'doc_level_embeddings'
+                    SELECT uuid FROM langchain_pg_collection WHERE name = 'hierarchical_documents'
                 )
                 AND cmetadata->>'source' IS NOT NULL
                 ORDER BY source
@@ -231,12 +231,19 @@ def query_documents(query: str = Form(...), k: int = Form(5)):
         # Limit k to reasonable bounds
         k = max(1, min(k, 20))
         
-
-
-        doc_store = get_vector_store("doc_level_embeddings")
-        chunk_store = get_vector_store("chunk_level_embeddings")
-
-        retriever = HierarchicalRetriever(doc_store, chunk_store)
+        # Use the new metadata-based hierarchical retriever
+        vector_store = get_vector_store("hierarchical_documents")
+        
+        # Calculate n_docs and n_chunks_per_doc from k
+        # For k results, retrieve from ~k/3 documents with 3-5 chunks each
+        n_docs = max(2, k // 3)
+        n_chunks_per_doc = max(3, k // n_docs)
+        
+        retriever = MetadataHierarchicalRetriever(
+            vector_store=vector_store,
+            n_docs=n_docs,
+            n_chunks_per_doc=n_chunks_per_doc
+        )
         results = retriever.get_relevant_documents(query)
         
         if not results:
@@ -253,17 +260,31 @@ def query_documents(query: str = Form(...), k: int = Form(5)):
             # Extract metadata
             source = doc.metadata.get('source', 'Unknown')
             source_path = Path(source)
+            chunk_type = doc.metadata.get('type', 'unknown')
+            chunk_index = doc.metadata.get('chunk_index', 'N/A')
+            parent_score = doc.metadata.get('parent_summary_score', None)
             
             # Calculate similarity percentage (lower score = more similar)
             # Note: The score is a distance metric, so lower is better
             similarity_pct = max(0, 100 - (score * 10))
+            
+            # Build metadata badge
+            metadata_info = f"Type: {chunk_type}"
+            if chunk_index != 'N/A':
+                metadata_info += f" | Chunk #{chunk_index}"
+            if parent_score is not None:
+                parent_sim_pct = max(0, 100 - (parent_score * 10))
+                metadata_info += f" | Doc Relevance: {parent_sim_pct:.1f}%"
             
             html_results.append(f"""
             <div style="border: 1px solid #ddd; padding: 1rem; margin-bottom: 1rem; border-radius: 5px;">
                 <div style="margin-bottom: 0.5rem;">
                     <strong>Result #{i}</strong> - 
                     <span style="color: #0066cc;">{source_path.name}</span>
-                    <span style="color: #666; font-size: 0.9em;">(Similarity: {similarity_pct:.1f}%)</span>
+                    <span style="color: #666; font-size: 0.9em;">(Chunk Similarity: {similarity_pct:.1f}%)</span>
+                </div>
+                <div style="font-size: 0.85em; color: #888; margin-bottom: 0.5rem;">
+                    {metadata_info}
                 </div>
                 <div style="background-color: #f5f5f5; padding: 0.75rem; border-radius: 3px; white-space: pre-wrap; font-family: monospace; font-size: 0.9em;">
 {doc.page_content}
